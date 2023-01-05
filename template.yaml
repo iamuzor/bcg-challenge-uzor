@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Service for handling image/video uploads
+
+Transform: AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        STAGE: !Ref StageName
+        APP_NAME: !Ref AppName
+        API_KEY: !FindInMap
+          - StagesMap
+          - Ref: StageName
+          - ApiKey
+
+Parameters:
+  AppName:
+    Type: String
+    Default: progimage
+  StageName:
+    Type: String
+    Default: dev
+
+Mappings:
+  StagesMap:
+    dev:
+      DomainName: dev.progimage.com
+      UserPoolId: '{{resolve:ssm:/dev/progimage/COGNITO_USER_POOL_ID}}'
+      UploadBucketName: progimage-uploads-dev
+      ApiKey: '{{resolve:ssm:/dev/progimage/API_KEY}}'
+    staging:
+      DomainName: staging.progimage.com
+      UserPoolId: '{{resolve:ssm:/staging/progimage/COGNITO_USER_POOL_ID}}'
+      UploadBucketName: progimage-uploads-staging
+      ApiKey: '{{resolve:ssm:/staging/progimage/API_KEY}}'
+    production:
+      DomainName: prd.progimage.com
+      UserPoolId: '{{resolve:ssm:/prd/progimage/COGNITO_USER_POOL_ID}}'
+      UploadBucketName: progimage-uploads-production
+      ApiKey: '{{resolve:ssm:/prd/progimage/API_KEY}}'
+
+Resources:
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: PublicRead
+      BucketName: !FindInMap
+        - StagesMap
+        - Ref: StageName
+        - UploadBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  UploadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: UploadBucketPolicyId
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: s3:GetObject
+            Resource: !Join
+              - ""
+              - - "arn:aws:s3:::"
+                - !Ref UploadBucket
+                - /*
+      Bucket: !Ref UploadBucket
+
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    DependsOn: ApiGatewayCloudwatchRole
+    Properties:
+      StageName: !Ref StageName
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: MyCognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        ApiKeyRequired: true
+        Authorizers:
+          MyCognitoAuthorizer:
+            UserPoolArn: !Join
+              - ""
+              - - !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/
+                - !FindInMap
+                  - StagesMap
+                  - Ref: StageName
+                  - UserPoolId
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayCloudwatchLogs.Arn
+        Format: "{ 'requestId':'$context.requestId', 'ip': '$context.identity.sourceIp', 'caller':'$context.identity.caller', 'user':'$context.identity.user','requestTime':'$context.requestTime', 'xrayTraceId':'$context.xrayTraceId', 'wafResponseCode':'$context.wafResponseCode', 'httpMethod':'$context.httpMethod','resourcePath':'$context.resourcePath', 'status':'$context.status','protocol':'$context.protocol', 'responseLength':'$context.responseLength' }"
+      MethodSettings:
+        - MetricsEnabled: true
+          ResourcePath: '/*'
+          HttpMethod: '*'
+
+  ApiMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn:
+      - ApiGatewayStage
+    Properties:
+      BasePath: mediaservice
+      DomainName: !FindInMap
+        - StagesMap
+        - Ref: StageName
+        - DomainName
+      RestApiId: !Ref ApiGateway
+      Stage: !Ref StageName
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - ApiGatewayStage
+    Properties:
+      ApiStages:
+        - ApiId: !Ref ApiGateway
+          Stage: !Ref StageName
+      Throttle:
+        BurstLimit: 300
+        RateLimit: 200
+      UsagePlanName: !Join
+        - "-"
+        - - !Ref AppName
+          - !Ref StageName
+          - "UsagePlan"
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - ApiGatewayStage
+    Properties:
+      Name: !Join
+        - "-"
+        - - !Ref AppName
+          - !Ref StageName
+          - "ApiKey"
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref ApiGateway
+          StageName: !Ref StageName
+      Value: !FindInMap
+        - StagesMap
+        - Ref: StageName
+        - ApiKey
+
+  ApiGatewayCloudwatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join
+        - "-"
+        - - !Ref AppName
+          - !Ref StageName
+
+  ApiGatewayCloudwatchRole:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+
+  CloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  GenerateVideoThumbnail:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Join
+        - "-"
+        - - !Ref AppName
+          - !Ref StageName
+          - GenerateVideoThumbnail
+      PackageType: Image
+      Timeout: 240
+      Events:
+        UploadBucketListener:
+          Type: S3
+          Properties:
+            Events: s3:ObjectCreated:*
+            Bucket: !Ref UploadBucket
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: !Join
+                - ""
+                - - "arn:aws:s3:::"
+                  - !FindInMap
+                    - StagesMap
+                    - Ref: StageName
+                    - UploadBucketName
+                  - "/*"
+    Metadata:
+      DockerTag: GenerateVideoThumbnail.v1
+      DockerContext: ./generate-video-thumbnail
+      Dockerfile: Dockerfile
+
+  GetUploadUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Events:
+        Root:
+          Type: Api
+          Properties:
+            Auth:
+              Authorizer: MyCognitoAuthorizer
+            Path: /upload-url
+            Method: GET
+            RestApiId: !Ref ApiGateway
+      Environment:
+        Variables:
+          UPLOAD_BUCKET_NAME: !FindInMap
+            - StagesMap
+            - Ref: StageName
+            - UploadBucketName
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - !Join
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - !FindInMap
+                      - StagesMap
+                      - Ref: StageName
+                      - UploadBucketName
+                    - "/*"
+    Metadata:
+      DockerTag: v1
+      DockerContext: ./get-upload-url
+      Dockerfile: Dockerfile
+
+Outputs:
+  ApiGatewayUrl:
+    Description: ApiGateway URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  ApiGatewayId:
+    Description: ApiGateway ID
+    Value: !Ref ApiGateway

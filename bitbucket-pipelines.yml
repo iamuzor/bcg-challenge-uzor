@@ -1,0 +1,100 @@
+image: node:16
+
+pipelines:
+  default:
+    - step:
+        name: Unit Test
+        runs-on:
+          - self.hosted
+          - linux
+          - ec2
+          - devops
+        caches:
+          - node
+        script:
+          - make unit_test
+
+    - step:
+        name: Dev Deploy
+        runs-on:
+          - self.hosted
+          - linux
+          - ec2
+          - devops
+        caches:
+          - node
+        services:
+          - docker
+        script:
+          - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip awscliv2.zip
+          - ./aws/install
+          - wget "https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip"
+          - sha256sum aws-sam-cli-linux-x86_64.zip
+          - unzip aws-sam-cli-linux-x86_64.zip -d sam-installation
+          - ./sam-installation/install
+          - rm -rf aws awscliv2.zip sam-installation aws-sam-cli-linux-x86_64.zip
+
+          - aws configure set aws_access_key_id "$DEV_AWS_ACCESS_KEY_ID" --profile default
+          - aws configure set aws_secret_access_key "$DEV_AWS_SECRET_ACCESS_KEY" --profile default
+          - aws configure set region "$DEV_AWS_REGION" --profile default
+          - aws configure set output "json" --profile default
+
+          - make deploy-dev
+
+    - step:
+        name: Staging Deploy
+        runs-on:
+          - self.hosted
+          - linux
+          - ec2
+          - devops
+        caches:
+          - node
+        services:
+          - docker
+        script:
+          - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip awscliv2.zip
+          - ./aws/install
+          - wget "https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip"
+          - sha256sum aws-sam-cli-linux-x86_64.zip
+          - unzip aws-sam-cli-linux-x86_64.zip -d sam-installation
+          - ./sam-installation/install
+          - rm -rf aws awscliv2.zip sam-installation aws-sam-cli-linux-x86_64.zip
+
+          - aws configure set aws_access_key_id "$STAGING_AWS_ACCESS_KEY_ID" --profile default
+          - aws configure set aws_secret_access_key "$STAGING_AWS_SECRET_ACCESS_KEY" --profile default
+          - aws configure set region "$STAGING_AWS_REGION" --profile default
+          - aws configure set output "json" --profile default
+
+          - make deploy-staging
+
+    - step:
+        name: Production Deploy
+        trigger: manual
+        runs-on:
+          - self.hosted
+          - linux
+          - ec2
+          - devops
+        caches:
+          - node
+        services:
+          - docker
+        script:
+          - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip awscliv2.zip
+          - ./aws/install
+          - wget "https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip"
+          - sha256sum aws-sam-cli-linux-x86_64.zip
+          - unzip aws-sam-cli-linux-x86_64.zip -d sam-installation
+          - ./sam-installation/install
+          - rm -rf aws awscliv2.zip sam-installation aws-sam-cli-linux-x86_64.zip
+
+          - aws configure set aws_access_key_id "$PROD_AWS_ACCESS_KEY_ID" --profile default
+          - aws configure set aws_secret_access_key "$PROD_AWS_SECRET_ACCESS_KEY" --profile default
+          - aws configure set region "$PROD_AWS_REGION" --profile default
+          - aws configure set output "json" --profile default
+
+          - make deploy-production
